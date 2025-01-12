@@ -1,7 +1,7 @@
 {
   "name": "vue-ts-auto-props",
   "type": "module",
-  "version": "0.1.0",
+  "version": "0.0.2",
   "packageManager": "pnpm@9.9.0",
   "description": "Vue 3 TypeScript defineComponent automatic props generator.",
   "license": "MIT",
