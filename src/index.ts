@@ -4,6 +4,7 @@ import { MagicString } from '@vue/compiler-sfc'
 import { createUnplugin } from 'unplugin'
 import type { Options } from './core/types'
 import VueTsAutoPropsTransformClass from './core/transform'
+import { genStringFromResolvedComponentsMap } from './core/utils'
 
 export * from './core/transform'
 export const VueTsAutoPropsTransform = VueTsAutoPropsTransformClass
@@ -25,8 +26,8 @@ export const unpluginFactory: UnpluginFactory<Options | undefined> = (options: O
     // iterate over all statements in the file and find defineComponent
     if (ast) {
       const transform = new VueTsAutoPropsTransform(checker, options?.hideWarnings ?? false)
-
-      transform.resolveComponents(ast.statements)
+      const autoCodes = transform.resolveComponents(ast.statements)
+      s.append(genStringFromResolvedComponentsMap(autoCodes))
     }
 
     return s.toString()

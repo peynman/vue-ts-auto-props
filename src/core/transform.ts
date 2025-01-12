@@ -1,3 +1,4 @@
+import util from 'node:util'
 import ts from 'typescript'
 
 /**
@@ -75,6 +76,64 @@ export default class VueTsAutoPropsTransform {
   }
 
   /**
+   * Extract basic type from a type node.
+   * for example: 'one' | 'two' | number | () => void => [string, number, function]
+   *
+   * @param type type to extract basic type from.
+   * @returns basic type string.
+   */
+  getBasicType(type: ts.TypeNode): string | undefined {
+    switch (type.kind) {
+      case ts.SyntaxKind.UnionType:
+        {
+          const unionTypes = (type as ts.UnionTypeNode).types.map(t => this.getBasicType(t))
+          return `[${unionTypes.filter((u, i) => unionTypes.indexOf(u) === i)}]`
+        }
+      case ts.SyntaxKind.ArrayType:
+        return `Array`
+      case ts.SyntaxKind.FunctionType:
+        return 'Function'
+      case ts.SyntaxKind.ParenthesizedType:
+        return this.getBasicType(
+          (type as ts.ParenthesizedTypeNode).type,
+        )
+      case ts.SyntaxKind.LiteralType:
+        if ((type as ts.LiteralTypeNode).literal.kind === ts.SyntaxKind.NumericLiteral) {
+          return 'Number'
+        }
+        return 'String'
+      case ts.SyntaxKind.StringKeyword:
+        return 'String'
+      case ts.SyntaxKind.BooleanKeyword:
+      case ts.SyntaxKind.FalseKeyword:
+      case ts.SyntaxKind.TrueKeyword:
+        return 'Boolean'
+      case ts.SyntaxKind.NumberKeyword:
+        return 'Number'
+      case ts.SyntaxKind.IntersectionType:
+      case ts.SyntaxKind.InterfaceDeclaration:
+      case ts.SyntaxKind.ObjectKeyword:
+        return 'Object'
+      case ts.SyntaxKind.AnyKeyword:
+        return 'Any'
+      case ts.SyntaxKind.UndefinedKeyword:
+        return 'Undefined'
+      case ts.SyntaxKind.TypeOperator:
+        return 'String'
+    }
+  }
+
+  /**
+   * Extract basic types from a union type.
+   *
+   * @param union union type node to extract basic types.
+   */
+  getUnionBaseTypes(union: ts.UnionTypeNode): string[] {
+    const basicTypename = union.types.map((t: ts.TypeNode) => this.getBasicType(t))
+    return basicTypename.filter((val, index) => val && basicTypename.indexOf(val) === index) as string[]
+  }
+
+  /**
    * Process all kinds of type nodes and return a string
    * corresponding for type declaration in Vue javascript props.
    *
@@ -83,18 +142,25 @@ export default class VueTsAutoPropsTransform {
    */
   resolveTypeScriptTypeToVue(
     type: ts.Node | undefined,
+    depth: number,
   ): string | string[] | undefined {
     if (!type) {
       return undefined
     }
 
     switch (type?.kind) {
+      case ts.SyntaxKind.TypeOperator:
+        if (depth === 1) {
+          return `String as PropType<${type.getText()}>`
+        }
+        return type.getText()
       case ts.SyntaxKind.IntersectionType:
       case ts.SyntaxKind.UnionType:
-        return (
+      {
+        const unionTypes = (
           type as ts.UnionTypeNode | ts.IntersectionTypeNode
         ).types?.reduce((arr: string[], t: ts.TypeNode) => {
-          const resolvedItem = this.resolveTypeScriptTypeToVue(t)
+          const resolvedItem = this.resolveTypeScriptTypeToVue(t, depth + 1)
           if (resolvedItem) {
             if (Array.isArray(resolvedItem)) {
               arr.push(...resolvedItem)
@@ -104,19 +170,33 @@ export default class VueTsAutoPropsTransform {
           }
           return arr
         }, [])
+
+        if (depth === 1) {
+          const basicTypes = this.getUnionBaseTypes(type as ts.UnionTypeNode)
+          return `${basicTypes} as PropType<${unionTypes.join('|')}>`
+        }
+        return unionTypes
+      }
       case ts.SyntaxKind.ArrayType:
-        return `Array<${(type as ts.ArrayTypeNode).elementType.getText()}>`
+        if (depth === 1) {
+          return `Array as PropType<Array<${this.resolveTypeScriptTypeToVue((type as ts.ArrayTypeNode).elementType, depth + 1)}>>`
+        }
+        return `Array<${this.resolveTypeScriptTypeToVue((type as ts.ArrayTypeNode).elementType, depth + 1)}>`
       case ts.SyntaxKind.FunctionType:
-        return type.getFullText()
+        if (depth === 1) {
+          return `Function as PropType<${type.getFullText()}>`
+        }
+        return `(${type.getFullText()})`
       case ts.SyntaxKind.ParenthesizedType:
-        return this.resolveTypeScriptTypeToVue(
-          (type as ts.ParenthesizedTypeNode).type,
-        )
+        return this.resolveTypeScriptTypeToVue((type as ts.ParenthesizedTypeNode).type, depth + 1)
       case ts.SyntaxKind.TypeAliasDeclaration:
         return this.getPropertyNameString((type as ts.TypeAliasDeclaration).name)
       case ts.SyntaxKind.LiteralType:
         return (type as ts.LiteralTypeNode).literal.getText()
       case ts.SyntaxKind.TypeLiteral:
+        if (depth === 1) {
+          return `Object as PropType<${(type as ts.TypeLiteralNode).getText()}>`
+        }
         return (type as ts.TypeLiteralNode).getText()
       case ts.SyntaxKind.ImportSpecifier:
         {
@@ -128,7 +208,7 @@ export default class VueTsAutoPropsTransform {
             if (importAlias) {
               const importDeclRef = importAlias.declarations?.[0]
               if (importDeclRef && ts.isTypeAliasDeclaration(importDeclRef)) {
-                return this.resolveTypeScriptTypeToVue(importDeclRef)
+                return this.resolveTypeScriptTypeToVue(importDeclRef, depth + 1)
               }
             } else {
               return (type as ts.ImportTypeNode).getText()
@@ -139,35 +219,52 @@ export default class VueTsAutoPropsTransform {
         return (((type as ts.TypeReferenceNode).typeName as ts.Identifier).escapedText.toString()
         )
       case ts.SyntaxKind.TypeReference:
-        {
-          // get symbol for this type reference
-          const trSymbol = this.checker.getSymbolAtLocation(
-            (type as ts.TypeReferenceNode).typeName,
-          )
-          // find if this symbol has declarations
-          const trDeclaration = trSymbol?.getDeclarations()?.[0]
-          // recursively resolve imports
-          if (trDeclaration && trDeclaration.kind === ts.SyntaxKind.ImportSpecifier) {
-            return this.resolveTypeScriptTypeToVue(trDeclaration)
-          }
-
-          if (trSymbol?.escapedName === 'Array') {
-            const args = (type as ts.TypeReferenceNode).typeArguments?.[0]
-            if (args) {
-              const innerType = this.resolveTypeScriptTypeToVue(args)
-              if (innerType) {
-                return `Array<${innerType}>`
-              }
+      {
+        // get symbol for this type reference
+        const trSymbol = this.checker.getSymbolAtLocation(
+          (type as ts.TypeReferenceNode).typeName,
+        )
+        // find if this symbol has declarations
+        const trDeclaration = trSymbol?.getDeclarations()?.[0]
+        // recursively resolve imports
+        if (trDeclaration) {
+          if (ts.isImportSpecifier(trDeclaration)) {
+            // import
+            return this.resolveTypeScriptTypeToVue(trDeclaration, depth) // don not increase depth on imports!
+          } else if (ts.isTypeAliasDeclaration(trDeclaration)) {
+            const baseType = this.getBasicType(trDeclaration.type) as string[] | string
+            const resolvedAlias = this.resolveTypeScriptTypeToVue(trDeclaration.type, depth + 1)
+            if (Array.isArray(resolvedAlias)) {
+              return `${baseType} as PropType<${resolvedAlias.join('|')}>`
+            } else {
+              return `${baseType} as PropType<${resolvedAlias}>`
             }
-
-            return 'Array'
           }
         }
+
+        if (trSymbol?.escapedName === 'Array') {
+          const args = (type as ts.TypeReferenceNode).typeArguments?.[0]
+          if (args) {
+            const innerType = this.resolveTypeScriptTypeToVue(args, depth + 1)
+            if (innerType) {
+              if (depth === 1) {
+                return `Array as Array<${innerType}>`
+              } else {
+                return `Array<${innerType}`
+              }
+            }
+          }
+
+          return 'Array'
+        }
         // otherwise return type class name
-        return (
-          ((type as ts.TypeReferenceNode).typeName as ts.Identifier)
-            .escapedText ?? '<type-not-found>'
-        )
+        const typeRef = type as ts.TypeReferenceNode
+        const typeRefName = (typeRef.typeName as ts.Identifier).escapedText ?? this.checker.typeToString(this.checker.getTypeFromTypeNode(typeRef))
+        if (depth === 1) {
+          return `Object as PropType<${typeRefName}>`
+        }
+        return typeRefName
+      }
       case ts.SyntaxKind.StringKeyword:
         return 'String'
       case ts.SyntaxKind.BooleanKeyword:
@@ -192,7 +289,7 @@ export default class VueTsAutoPropsTransform {
   getVuePropFromPropertySignature(prop: ts.PropertySignature): VuePropsMeta | undefined {
     const propName = this.getPropertyNameString(prop.name)
     if (propName) {
-      const propType = this.resolveTypeScriptTypeToVue((prop).type)
+      const propType = this.resolveTypeScriptTypeToVue((prop).type, 1)
       const hasUndefined = Array.isArray(propType) ? propType.includes('Undefined') : false
       const questionToken = (prop as ts.PropertySignature | ts.MethodSignature).questionToken
 
@@ -281,6 +378,7 @@ export default class VueTsAutoPropsTransform {
                 }
               }
             } else {
+              console.log(util.inspect(typeRefSymbol, { depth: 1 }))
               if (!this.hideWarnings) {
                 console.warn('type reference does not resolve to a declaration')
               }
@@ -384,7 +482,7 @@ export default class VueTsAutoPropsTransform {
    * @param statements list of statements to search for defineComponent.
    * @returns resolved meta data about statements.
    */
-  resolveComponents(statements: ts.NodeArray<ts.Statement>): { [key: string]: VueResolvedMeta } {
+  resolveComponents(statements: ts.NodeArray<ts.Statement>): Record<string, VueResolvedMeta> {
     const autoCodes: { [key: string]: VueResolvedMeta } = {}
 
     statements.forEach((statement: ts.Statement) => {

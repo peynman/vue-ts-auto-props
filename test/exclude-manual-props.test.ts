@@ -67,9 +67,9 @@ describe('check excluding manual props', () => {
             messages: string[]
         }
 
-        const MyCustomTSComponent = defineComponent<MyCustomProps & OtherProperties & {
+        const MyCustomTSComponent = defineComponent((props: MyCustomProps & OtherProperties & {
             literal: boolean
-        }>((props) => {},{
+        }) => {},{
             props: {
                 messages: {
                     type: Array,
